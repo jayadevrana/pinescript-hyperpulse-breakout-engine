@@ -1,0 +1,102 @@
+//@version=6
+indicator("HyperPulse Breakout Engine [Signal Forge]", shorttitle="HyperPulse Engine", overlay=false, max_labels_count=200)
+
+groupCore = "Core"
+atrLen = input.int(14, "ATR Length", minval=1, group=groupCore)
+stFactor = input.float(2.4, "SuperTrend Factor", minval=0.1, step=0.1, group=groupCore)
+stLen = input.int(10, "SuperTrend ATR Period", minval=1, group=groupCore)
+pulseLen = input.int(21, "Pulse Normalization Length", minval=5, group=groupCore)
+signalLen = input.int(5, "Pulse Smoothing", minval=1, group=groupCore)
+bbLen = input.int(20, "Compression Length", minval=5, group=groupCore)
+volumeLen = input.int(20, "Volume Baseline", minval=2, group=groupCore)
+extreme = input.float(1.6, "Glow Threshold", minval=0.5, step=0.1, group=groupCore)
+
+groupDisplay = "Display"
+showLabels = input.bool(true, "Show Event Labels", group=groupDisplay)
+showDashboard = input.bool(true, "Show Dashboard", group=groupDisplay)
+
+bullCore = color.rgb(0, 211, 179)
+bullGlow = color.rgb(140, 255, 224)
+bearCore = color.rgb(255, 93, 126)
+bearGlow = color.rgb(255, 191, 104)
+neutralCore = color.rgb(122, 134, 154)
+
+f_push_label(array<label> bucket, label item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        label.delete(array.shift(bucket))
+
+[superTrend, _] = ta.supertrend(stFactor, stLen)
+atr = ta.atr(atrLen)
+priceDistance = (close - superTrend) / math.max(atr, syminfo.mintick)
+rocSeries = ta.roc(close, 5)
+rocScale = math.max(ta.stdev(rocSeries, pulseLen), 0.01)
+rocNorm = ta.ema(rocSeries / rocScale, 3)
+volumePulse = volume / math.max(ta.sma(volume, volumeLen), 1.0) - 1.0
+
+bbBasis = ta.sma(close, bbLen)
+bbDev = ta.stdev(close, bbLen)
+bbWidth = bbBasis != 0.0 ? (bbDev * 4.0) / bbBasis : 0.0
+widthBase = ta.sma(bbWidth, pulseLen)
+squeeze = bbWidth < widthBase
+release = not squeeze and squeeze[1]
+
+pulseRaw = priceDistance * 0.60 + rocNorm * 0.25 + volumePulse * 0.90
+pulse = ta.ema(pulseRaw, signalLen)
+trigger = ta.ema(pulse, 3)
+hist = pulse - trigger
+glow = math.abs(pulse) > extreme
+
+igniteLong = release and ta.crossover(pulse, trigger) and pulse > 0.0 and priceDistance > 0.0
+igniteShort = release and ta.crossunder(pulse, trigger) and pulse < 0.0 and priceDistance < 0.0
+bullFlip = ta.crossover(pulse, -extreme) and pulse[1] < -extreme
+bearFlip = ta.crossunder(pulse, extreme) and pulse[1] > extreme
+
+var array<label> tags = array.new_label()
+var table dash = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 58), frame_color=color.new(color.white, 70), frame_width=1)
+
+if showLabels and igniteLong
+    f_push_label(tags, label.new(x=bar_index, y=pulse, text="IGNITE LONG", style=label.style_label_up, color=bullGlow, textcolor=color.black, size=size.small), 40)
+
+if showLabels and igniteShort
+    f_push_label(tags, label.new(x=bar_index, y=pulse, text="IGNITE SHORT", style=label.style_label_down, color=bearGlow, textcolor=color.black, size=size.small), 40)
+
+if showLabels and bullFlip
+    f_push_label(tags, label.new(x=bar_index, y=pulse, text="RESET", style=label.style_label_up, color=bullCore, textcolor=color.black, size=size.tiny), 40)
+
+if showLabels and bearFlip
+    f_push_label(tags, label.new(x=bar_index, y=pulse, text="RESET", style=label.style_label_down, color=bearCore, textcolor=color.black, size=size.tiny), 40)
+
+zeroPlot = plot(0.0, "Zero", color=color.new(color.white, 65))
+upperPlot = plot(extreme, "Upper Glow", color=color.new(bearGlow, 60), style=plot.style_circles)
+lowerPlot = plot(-extreme, "Lower Glow", color=color.new(bullGlow, 60), style=plot.style_circles)
+histPlot = plot(hist, "Impulse Histogram", style=plot.style_columns, color=hist >= 0.0 ? color.new(bullCore, 25) : color.new(bearCore, 25))
+pulseColor = color.from_gradient(pulse, -2.5, 2.5, bearCore, bullCore)
+pulsePlot = plot(pulse, "Pulse", color=pulseColor, linewidth=3)
+triggerPlot = plot(trigger, "Trigger", color=color.new(color.white, 15), linewidth=2)
+fill(pulsePlot, zeroPlot, color=color.new(pulse >= 0.0 ? bullCore : bearCore, 90))
+fill(upperPlot, lowerPlot, color=color.new(neutralCore, 94))
+
+bgcolor(glow ? color.new(pulse > 0.0 ? bullCore : bearCore, 92) : squeeze ? color.new(color.blue, 95) : na)
+plotshape(igniteLong, title="Ignite Long", style=shape.triangleup, location=location.bottom, color=bullGlow, size=size.small, text="L", textcolor=color.black)
+plotshape(igniteShort, title="Ignite Short", style=shape.triangledown, location=location.top, color=bearGlow, size=size.small, text="S", textcolor=color.black)
+plotshape(bullFlip, title="Bull Reset", style=shape.diamond, location=location.bottom, color=bullCore, size=size.tiny)
+plotshape(bearFlip, title="Bear Reset", style=shape.diamond, location=location.top, color=bearCore, size=size.tiny)
+
+if barstate.islast and showDashboard
+    stateText = igniteLong ? "Igniting Long" : igniteShort ? "Igniting Short" : glow ? "Glow Phase" : squeeze ? "Compression" : pulse > 0.0 ? "Positive Drift" : "Negative Drift"
+    table.cell(dash, 0, 0, "HYPERPULSE", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, stateText, text_color=pulse >= 0.0 ? bullGlow : bearGlow, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 0, 1, "Pulse / Trigger", text_color=color.white)
+    table.cell(dash, 1, 1, str.tostring(pulse, "#.00") + " / " + str.tostring(trigger, "#.00"), text_color=color.white)
+    table.cell(dash, 0, 2, "Distance", text_color=color.white)
+    table.cell(dash, 1, 2, str.tostring(priceDistance, "#.00") + " ATR", text_color=pulse >= 0.0 ? bullGlow : bearGlow)
+    table.cell(dash, 0, 3, "Compression", text_color=color.white)
+    table.cell(dash, 1, 3, squeeze ? "Coiled" : release ? "Released" : "Open", text_color=release ? bullGlow : neutralCore)
+    table.cell(dash, 0, 4, "Flow", text_color=color.white)
+    table.cell(dash, 1, 4, str.tostring(volumePulse + 1.0, "#.00") + "x", text_color=volumePulse > 0.0 ? bullGlow : neutralCore)
+
+if barstate.islast and not showDashboard
+    for row = 0 to 4
+        table.cell(dash, 0, row, "", bgcolor=color.new(color.black, 100))
+        table.cell(dash, 1, row, "", bgcolor=color.new(color.black, 100))
